@@ -8,6 +8,18 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+// Limites usados para normalizar as opções do gráfico de barras.
+const (
+	minBarChartWidth    = 1
+	maxBarChartWidth    = 500
+	minBarChartBarWidth = 1
+	maxBarChartBarWidth = 20
+)
+
+// verticalChartHeight é a altura (em linhas) da área de barras no modo
+// vertical.
+const verticalChartHeight = 10
+
 // BarChart renders horizontal or vertical bar charts in the terminal.
 type BarChart struct {
 	labels     []string
@@ -37,14 +49,16 @@ func NewBarChart(labels []string, values []float64) *BarChart {
 }
 
 // Width sets the maximum width of the chart.
+// Values outside the 1..500 range are clamped to the nearest valid value.
 func (b *BarChart) Width(w int) *BarChart {
-	b.width = w
+	b.width = clamp(w, minBarChartWidth, maxBarChartWidth)
 	return b
 }
 
 // BarWidth sets the thickness of each bar (in rows for horizontal charts).
+// Values outside the 1..20 range are clamped to the nearest valid value.
 func (b *BarChart) BarWidth(w int) *BarChart {
-	b.barWidth = w
+	b.barWidth = clamp(w, minBarChartBarWidth, maxBarChartBarWidth)
 	return b
 }
 
@@ -96,7 +110,8 @@ func (b *BarChart) Render() string {
 	return b.renderVertical()
 }
 
-func (b *BarChart) renderHorizontal() string {
+// maxValue devolve o maior valor do gráfico (nunca zero).
+func (b *BarChart) maxValue() float64 {
 	maxVal := 0.0
 	for _, v := range b.values {
 		maxVal = math.Max(maxVal, v)
@@ -104,101 +119,181 @@ func (b *BarChart) renderHorizontal() string {
 	if maxVal == 0 {
 		maxVal = 1
 	}
+	return maxVal
+}
 
-	// Find longest label for alignment
-	maxLabelLen := 0
-	for _, l := range b.labels {
-		if len(l) > maxLabelLen {
-			maxLabelLen = len(l)
+// labelAt devolve o rótulo do índice informado, quando existir.
+func (b *BarChart) labelAt(i int) string {
+	if i < 0 || i >= len(b.labels) {
+		return ""
+	}
+	return b.labels[i]
+}
+
+// maxLabelWidth devolve a maior largura de exibição entre os rótulos.
+// Rótulos sem valor correspondente são ignorados.
+func (b *BarChart) maxLabelWidth() int {
+	width := 0
+	for i := range b.values {
+		if w := displayWidth(b.labelAt(i)); w > width {
+			width = w
 		}
 	}
+	return width
+}
 
-	barMaxWidth := b.width - maxLabelLen - 2
+// maxValueWidth devolve a maior largura de exibição entre os valores
+// formatados (usado para reservar a coluna de valores).
+func (b *BarChart) maxValueWidth() int {
+	width := 0
+	for _, v := range b.values {
+		if w := displayWidth(formatValue(v)); w > width {
+			width = w
+		}
+	}
+	return width
+}
+
+// formatValue formata um valor do gráfico.
+func formatValue(v float64) string {
+	return fmt.Sprintf("%.1f", v)
+}
+
+func (b *BarChart) renderHorizontal() string {
+	width := clamp(b.width, minBarChartWidth, maxBarChartWidth)
+	thickness := clamp(b.barWidth, minBarChartBarWidth, maxBarChartBarWidth)
+	maxVal := b.maxValue()
+
+	labelWidth := b.maxLabelWidth()
+	valueWidth := 0
 	if b.showValues {
-		barMaxWidth -= 10
-	}
-	if barMaxWidth < 5 {
-		barMaxWidth = 5
+		valueWidth = b.maxValueWidth()
 	}
 
-	var result strings.Builder
+	// Espaço disponível para as barras: o que sobra da largura pedida
+	// depois das colunas fixas de rótulo e valor.
+	barArea := width - labelWidth - 1
+	if b.showValues {
+		barArea -= valueWidth + 1
+	}
+	if barArea < 1 {
+		barArea = 1
+	}
+
+	lines := make([]string, 0, len(b.values)*thickness)
 	for i, val := range b.values {
-		label := ""
-		if i < len(b.labels) {
-			label = b.labels[i]
-		}
-
-		paddedLabel := fmt.Sprintf("%*s", maxLabelLen, label)
-		barLen := int(math.Round(val / maxVal * float64(barMaxWidth)))
+		barLen := int(math.Round(val / maxVal * float64(barArea)))
 		if barLen < 0 {
 			barLen = 0
 		}
-
+		if barLen > barArea {
+			barLen = barArea
+		}
 		bar := strings.Repeat("█", barLen)
 
-		line := b.labelStyle.Render(paddedLabel) + " " + b.barStyle.Render(bar)
-		if b.showValues {
-			line += fmt.Sprintf(" %.1f", val)
-		}
+		// A célula da barra tem largura fixa: as barras menores são
+		// completadas com espaços para que os valores fiquem alinhados.
+		barCell := b.barStyle.Render(bar) + strings.Repeat(" ", barArea-barLen)
 
-		for row := 0; row < b.barWidth; row++ {
-			result.WriteString(line)
-			if i < len(b.values)-1 || row < b.barWidth-1 {
-				result.WriteRune('\n')
+		// A espessura da barra é dada pelo número de linhas do grupo:
+		// o rótulo e o valor ficam na primeira linha e as demais repete o
+		// preenchimento da barra.
+		for row := 0; row < thickness; row++ {
+			labelPart := padLeft(b.labelAt(i), labelWidth)
+			if row > 0 {
+				labelPart = strings.Repeat(" ", labelWidth)
 			}
+
+			line := b.labelStyle.Render(labelPart) + " " + barCell
+			if b.showValues {
+				valuePart := strings.Repeat(" ", valueWidth)
+				if row == 0 {
+					valuePart = padLeft(formatValue(val), valueWidth)
+				}
+				line += " " + valuePart
+			}
+			lines = append(lines, line)
 		}
 	}
 
-	return b.style.Render(result.String())
+	return b.style.Render(strings.Join(lines, "\n"))
 }
 
 func (b *BarChart) renderVertical() string {
-	maxVal := 0.0
-	for _, v := range b.values {
-		maxVal = math.Max(maxVal, v)
-	}
-	if maxVal == 0 {
-		maxVal = 1
-	}
+	width := clamp(b.width, minBarChartWidth, maxBarChartWidth)
+	barWidth := clamp(b.barWidth, minBarChartBarWidth, maxBarChartBarWidth)
+	maxVal := b.maxValue()
+	count := len(b.values)
 
-	chartHeight := 10
-	colWidth := b.barWidth + 1
-
-	// Build columns
-	rows := make([]strings.Builder, chartHeight+1) // +1 for labels
-
-	for row := 0; row < chartHeight; row++ {
-		threshold := float64(chartHeight-row) / float64(chartHeight)
-		for _, val := range b.values {
-			normalized := val / maxVal
-			if normalized >= threshold {
-				rows[row].WriteString(b.barStyle.Render(strings.Repeat("█", b.barWidth)))
-			} else {
-				rows[row].WriteString(strings.Repeat(" ", b.barWidth))
-			}
-			rows[row].WriteRune(' ')
+	// Largura natural de cada coluna: o maior entre a barra, o valor e o
+	// rótulo, para que nada seja cortado sem necessidade.
+	colWidth := barWidth
+	if b.showValues {
+		if w := b.maxValueWidth(); w > colWidth {
+			colWidth = w
 		}
 	}
+	if w := b.maxLabelWidth(); w > colWidth {
+		colWidth = w
+	}
 
-	// Label row
+	// A largura pedida é o limite: as colunas encolhem para caber.
+	available := width - (count - 1)
+	if available < count {
+		available = count
+	}
+	if limit := available / count; colWidth > limit {
+		colWidth = limit
+	}
+	if colWidth < 1 {
+		colWidth = 1
+	}
+
+	lines := make([]string, 0, verticalChartHeight+2)
+
+	// Linha de valores (acima do gráfico).
+	if b.showValues {
+		var row strings.Builder
+		for i := range b.values {
+			if i > 0 {
+				row.WriteString(" ")
+			}
+			value := fitLabel(formatValue(b.values[i]), colWidth)
+			row.WriteString(center(value, colWidth))
+		}
+		lines = append(lines, row.String())
+	}
+
+	// Área de barras.
+	for r := 0; r < verticalChartHeight; r++ {
+		threshold := float64(verticalChartHeight-r) / float64(verticalChartHeight)
+		var row strings.Builder
+		for i, val := range b.values {
+			if i > 0 {
+				row.WriteString(" ")
+			}
+			bar := strings.Repeat(" ", barWidth)
+			if val/maxVal >= threshold {
+				bar = b.barStyle.Render(strings.Repeat("█", barWidth))
+			}
+			// Centraliza a barra dentro da coluna.
+			pad := colWidth - barWidth
+			left := pad / 2
+			row.WriteString(strings.Repeat(" ", left) + bar + strings.Repeat(" ", pad-left))
+		}
+		lines = append(lines, row.String())
+	}
+
+	// Linha de rótulos (abaixo do gráfico), centralizados em cada coluna.
+	var labelRow strings.Builder
 	for i := range b.values {
-		label := ""
-		if i < len(b.labels) {
-			label = b.labels[i]
-			if len(label) > colWidth {
-				label = label[:colWidth-1] + "."
-			}
+		if i > 0 {
+			labelRow.WriteString(" ")
 		}
-		rows[chartHeight].WriteString(b.labelStyle.Render(fmt.Sprintf("%-*s", colWidth, label)))
+		label := fitLabel(b.labelAt(i), colWidth)
+		labelRow.WriteString(b.labelStyle.Render(center(label, colWidth)))
 	}
+	lines = append(lines, labelRow.String())
 
-	var result strings.Builder
-	for i, row := range rows {
-		result.WriteString(row.String())
-		if i < len(rows)-1 {
-			result.WriteRune('\n')
-		}
-	}
-
-	return b.style.Render(result.String())
+	return b.style.Render(strings.Join(lines, "\n"))
 }

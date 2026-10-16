@@ -9,6 +9,14 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+// Limites usados para normalizar as opções do sparkline.
+const (
+	minSparklineWidth  = 1
+	maxSparklineWidth  = 500
+	minSparklineHeight = 1
+	maxSparklineHeight = 8
+)
+
 // Sparkline renders a compact line chart using Unicode block characters.
 // It fits data into a fixed width and height, scaling values automatically.
 type Sparkline struct {
@@ -33,20 +41,16 @@ func NewSparkline(data []float64) *Sparkline {
 }
 
 // Width sets the display width in characters.
+// Values outside the 1..500 range are clamped to the nearest valid value.
 func (s *Sparkline) Width(w int) *Sparkline {
-	s.width = w
+	s.width = clamp(w, minSparklineWidth, maxSparklineWidth)
 	return s
 }
 
 // Height sets the display height in rows (1-8).
+// Values outside the 1..8 range are clamped to the nearest valid value.
 func (s *Sparkline) Height(h int) *Sparkline {
-	if h < 1 {
-		h = 1
-	}
-	if h > 8 {
-		h = 8
-	}
-	s.height = h
+	s.height = clamp(h, minSparklineHeight, maxSparklineHeight)
 	return s
 }
 
@@ -57,6 +61,8 @@ func (s *Sparkline) Style(st lipgloss.Style) *Sparkline {
 }
 
 // Label sets an optional label displayed before the sparkline.
+// The label is always rendered on the first line of the chart, followed by
+// the remaining lines padded so the columns stay aligned.
 func (s *Sparkline) Label(l string) *Sparkline {
 	s.label = l
 	return s
@@ -68,8 +74,11 @@ func (s *Sparkline) Render() string {
 		return ""
 	}
 
+	width := clamp(s.width, minSparklineWidth, maxSparklineWidth)
+	height := clamp(s.height, minSparklineHeight, maxSparklineHeight)
+
 	// Resample data to fit width
-	resampled := resample(s.data, s.width)
+	resampled := resample(s.data, width)
 
 	// Find min/max for scaling
 	minVal, maxVal := resampled[0], resampled[0]
@@ -83,79 +92,105 @@ func (s *Sparkline) Render() string {
 		span = 1
 	}
 
-	levels := len(blocks) * s.height
+	// Cada linha do gráfico representa (len(blocks)-1) sub-níveis.
+	levels := height * (len(blocks) - 1)
 
-	if s.height == 1 {
-		var b strings.Builder
-		if s.label != "" {
-			b.WriteString(s.label + " ")
-		}
-		for _, v := range resampled {
-			normalized := (v - minVal) / span
-			idx := int(normalized * float64(len(blocks)-1))
-			if idx >= len(blocks) {
-				idx = len(blocks) - 1
-			}
-			b.WriteRune(blocks[idx])
-		}
-		return s.style.Render(b.String())
-	}
-
-	// Multi-row rendering
-	rows := make([]strings.Builder, s.height)
+	rows := make([]string, height)
 	for _, v := range resampled {
 		normalized := (v - minVal) / span
-		cellLevel := int(normalized * float64(levels-1))
+		cellLevel := int(normalized * float64(levels))
 
-		for row := 0; row < s.height; row++ {
-			rowFromBottom := s.height - 1 - row
-			rowBase := rowFromBottom * (len(blocks) - 1)
-			localLevel := cellLevel - rowBase
+		for row := 0; row < height; row++ {
+			rowFromBottom := height - 1 - row
+			localLevel := cellLevel - rowFromBottom*(len(blocks)-1)
 
-			if localLevel <= 0 {
-				rows[row].WriteRune(' ')
-			} else if localLevel >= len(blocks)-1 {
-				rows[row].WriteRune(blocks[len(blocks)-1])
-			} else {
-				rows[row].WriteRune(blocks[localLevel])
+			switch {
+			case localLevel <= 0:
+				rows[row] += " "
+			case localLevel >= len(blocks)-1:
+				rows[row] += string(blocks[len(blocks)-1])
+			default:
+				rows[row] += string(blocks[localLevel])
 			}
 		}
 	}
 
-	var result strings.Builder
+	// O rótulo fica na primeira linha do gráfico; as demais linhas recebem
+	// o mesmo espaçamento para manter as colunas alinhadas.
+	prefix := ""
 	if s.label != "" {
-		result.WriteString(s.label + "\n")
+		prefix = s.label + " "
 	}
+	prefixWidth := displayWidth(prefix)
+
+	lines := make([]string, height)
 	for i, row := range rows {
-		result.WriteString(s.style.Render(row.String()))
-		if i < len(rows)-1 {
-			result.WriteRune('\n')
+		if i == 0 {
+			lines[i] = prefix + row
+		} else {
+			lines[i] = strings.Repeat(" ", prefixWidth) + row
 		}
 	}
-	return result.String()
+
+	return s.style.Render(strings.Join(lines, "\n"))
 }
 
 // resample reduces or expands data to fit the target width.
+// When there are fewer points than columns the data is expanded with linear
+// interpolation; when there are more points the data is reduced by averaging
+// each bucket.
 func resample(data []float64, width int) []float64 {
-	if len(data) == 0 {
+	if len(data) == 0 || width <= 0 {
 		return nil
 	}
-	if len(data) <= width {
-		return data
+	if len(data) == width {
+		return append([]float64(nil), data...)
 	}
+
+	if len(data) > width {
+		result := make([]float64, width)
+		ratio := float64(len(data)) / float64(width)
+		for i := 0; i < width; i++ {
+			start := int(float64(i) * ratio)
+			end := int(float64(i+1) * ratio)
+			if end > len(data) {
+				end = len(data)
+			}
+			if end <= start {
+				end = start + 1
+			}
+			sum := 0.0
+			for j := start; j < end; j++ {
+				sum += data[j]
+			}
+			result[i] = sum / float64(end-start)
+		}
+		return result
+	}
+
+	// Expansão: interpolação linear entre os pontos originais.
 	result := make([]float64, width)
-	ratio := float64(len(data)) / float64(width)
+	if len(data) == 1 {
+		for i := range result {
+			result[i] = data[0]
+		}
+		return result
+	}
+	if width == 1 {
+		result[0] = data[0]
+		return result
+	}
+
+	step := float64(len(data)-1) / float64(width-1)
 	for i := 0; i < width; i++ {
-		start := int(float64(i) * ratio)
-		end := int(float64(i+1) * ratio)
-		if end > len(data) {
-			end = len(data)
+		pos := float64(i) * step
+		low := int(math.Floor(pos))
+		high := int(math.Ceil(pos))
+		if high >= len(data) {
+			high = len(data) - 1
 		}
-		sum := 0.0
-		for j := start; j < end; j++ {
-			sum += data[j]
-		}
-		result[i] = sum / float64(end-start)
+		frac := pos - float64(low)
+		result[i] = data[low]*(1-frac) + data[high]*frac
 	}
 	return result
 }

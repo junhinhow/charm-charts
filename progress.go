@@ -7,6 +7,12 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+// Limites usados para normalizar as opções da barra de progresso.
+const (
+	minProgressWidth = 0
+	maxProgressWidth = 500
+)
+
 // ProgressBar renders a horizontal progress bar with optional label and
 // percentage display.
 type ProgressBar struct {
@@ -40,8 +46,10 @@ func NewProgressBar(value float64) *ProgressBar {
 }
 
 // Width sets the bar width in characters.
+// Negative values are clamped to 0 (barra vazia) and values above 500 are
+// clamped to 500.
 func (p *ProgressBar) Width(w int) *ProgressBar {
-	p.width = w
+	p.width = clamp(w, minProgressWidth, maxProgressWidth)
 	return p
 }
 
@@ -83,11 +91,16 @@ func (p *ProgressBar) EmptyChar(c rune) *ProgressBar {
 
 // Render returns the progress bar as a styled string.
 func (p *ProgressBar) Render() string {
-	filled := int(p.value * float64(p.width))
-	if filled > p.width {
-		filled = p.width
+	width := clamp(p.width, minProgressWidth, maxProgressWidth)
+
+	filled := int(p.value * float64(width))
+	if filled > width {
+		filled = width
 	}
-	empty := p.width - filled
+	if filled < 0 {
+		filled = 0
+	}
+	empty := width - filled
 
 	bar := p.fillStyle.Render(strings.Repeat(string(p.fillChar), filled)) +
 		p.emptyStyle.Render(strings.Repeat(string(p.emptyChar), empty))
